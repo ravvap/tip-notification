@@ -1,0 +1,22 @@
+{
+  "UserConfig": {
+    "NamespaceConfig": [
+      {
+        "Type": "EventHub",
+        "Name": "emulatorNs1",
+        "Entities": [
+          {
+            "Name": "tip-notifications",
+            "PartitionCount": "2",
+            "ConsumerGroups": [
+              { "Name": "tip-notification-service" }
+            ]
+          }
+        ]
+      }
+    ],
+    "LoggingConfig": {
+      "Type": "File"
+    }
+  }
+}

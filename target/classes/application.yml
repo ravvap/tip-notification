@@ -1,0 +1,63 @@
+spring:
+  application:
+    name: tip-notification
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/tip
+    username: ${DB_USERNAME:tip_app}
+    password: ${DB_PASSWORD:changeme}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Entra AD (Azure AD) tenant issuer - matches the pattern used elsewhere in TIP.
+          # Defaults kept resolvable (not a hard failure) so the app can still start under
+          # the "local" profile without AZURE_TENANT_ID set, even though SecurityConfig
+          # itself is disabled for that profile - see LocalSecurityConfig.
+          issuer-uri: https://login.microsoftonline.com/${AZURE_TENANT_ID:not-configured}/v2.0
+          jwk-set-uri: https://login.microsoftonline.com/${AZURE_TENANT_ID:not-configured}/discovery/v2.0/keys
+
+# --- Azure Event Hub (source of incoming events, consumed by EventHubConsumerService) ---
+tip:
+  event-hub:
+    auth-mode: managed-identity            # connection-string | managed-identity
+    fully-qualified-namespace: ${EVENTHUB_NAMESPACE:tip-eventhub-ns.servicebus.windows.net}
+    event-hub-name: ${EVENTHUB_NAME:tip-notifications}
+    consumer-group: ${EVENTHUB_CONSUMER_GROUP:tip-notification-service}
+    connection-string: ${EVENTHUB_CONNECTION_STRING:}
+    checkpoint-storage-account-url: ${CHECKPOINT_STORAGE_URL:https://tipnotifcheckpoints.blob.core.windows.net}
+    checkpoint-container-name: tip-notification-checkpoints
+    checkpoint-storage-connection-string: ${CHECKPOINT_STORAGE_CONNECTION_STRING:}
+
+  email-api:
+    base-url: ${EMAIL_API_BASE_URL:https://internal.fdic.gov/email-api}
+    send-path: /v1/messages
+    auth-mode: api-key         # api-key | bearer
+    api-key-header-name: X-API-Key
+    api-key: ${EMAIL_API_KEY:}
+    bearer-token: ${EMAIL_API_BEARER_TOKEN:}
+    connect-timeout-ms: 3000
+    read-timeout-ms: 5000
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.fdic.tip.notification: INFO

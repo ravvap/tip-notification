@@ -1,0 +1,30 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/tip_dev
+
+tip:
+  event-hub:
+    # IMPORTANT: the emulator does NOT support Microsoft Entra ID / managed
+    # identity auth - only connection-string mode works against it. Switch
+    # back to managed-identity for anything beyond local dev.
+    auth-mode: connection-string
+    event-hub-name: tip-notifications
+    consumer-group: tip-notification-service
+    # Fixed dev key documented by Microsoft for the emulator - not a real secret.
+    connection-string: "Endpoint=sb://localhost;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;"
+
+    # Checkpoint store also needs somewhere to live locally - Azurite (already
+    # running as a dependency of the emulator, see docker-compose file) covers
+    # this using its well-known default dev account key.
+    checkpoint-storage-connection-string: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+    checkpoint-container-name: tip-notification-checkpoints-local
+
+  email-api:
+    base-url: http://localhost:9999/mock-email-api
+    auth-mode: api-key
+    api-key: dev-local-key
+
+logging:
+  level:
+    com.fdic.tip.notification: DEBUG
+    com.azure.messaging.eventhubs: INFO
