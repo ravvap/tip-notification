@@ -10,24 +10,29 @@ import org.springframework.context.annotation.Bean;
  * dependency gets a NotificationPublishClient bean for free, with zero code
  * beyond application.yml properties:
  *
- *   tip:
- *     notification-publish:
- *       base-url: https://tip-notification.internal.fdic.gov
- *       auth-mode: managed-identity
- *       token-scope: api://tip-notification-service/.default
+ * <pre>{@code
+ * tip:
+ * notification-publish:
+ * enabled: true
+ * auth-mode: connection-string
+ * connection-string: Endpoint=sb://your-namespace.servicebus.windows.net/;SharedAccessKeyName=...
+ * event-hub-name: notification-events
+ * }</pre>
  *
  * Then anywhere in your service:
  *
- *   @Autowired
- *   private NotificationPublishClient notificationPublishClient;
+ * <pre>{@code
+ * @Autowired
+ * private NotificationPublishClient notificationPublishClient;
  *
- *   notificationPublishClient.publish(NotificationPublishRequest.builder()
- *       .source("RETENTION_ETL")
- *       .eventType("RETENTION_STAMPED")
- *       .idempotencyKey("retention-stamp-" + record.getRecordId())   // stable if this step can retry
- *       .recipientEmail(record.getOwnerEmail())
- *       .context(Map.of("recordId", record.getRecordId()))
- *       .build());
+ * notificationPublishClient.publish(NotificationPublishRequest.builder()
+ * .source("RETENTION_ETL")
+ * .eventType("RETENTION_STAMPED")
+ * .idempotencyKey("retention-stamp-" + record.getRecordId())   // stable if this step can retry
+ * .recipientEmail(record.getOwnerEmail())
+ * .context(Map.of("recordId", record.getRecordId()))
+ * .build());
+ * }</pre>
  *
  * Set tip.notification-publish.enabled=false to disable (e.g. most test profiles).
  */
@@ -36,17 +41,18 @@ import org.springframework.context.annotation.Bean;
 @ConditionalOnProperty(prefix = "tip.notification-publish", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class TipCommonsNotificationAutoConfiguration {
 
-    @Bean
+    /**
+     * Creates and registers the central publishing engine bean.
+     * The destroyMethod configuration ensures that Spring closes the underlying 
+     * EventHubProducerClient connection pool cleanly when the application context is destroyed.
+     */
+    @Bean(destroyMethod = "close")
     public NotificationPublishEngine notificationPublishEngine(NotificationPublishProperties properties) {
         return NotificationPublishEngine.builder()
-                .baseUrl(properties.getBaseUrl())
                 .authMode(properties.getAuthMode())
-                .tenantId(properties.getTenantId())
-                .clientId(properties.getClientId())
-                .clientSecret(properties.getClientSecret())
-                .tokenScope(properties.getTokenScope())
-                .connectTimeoutMs(properties.getConnectTimeoutMs())
-                .requestTimeout(java.time.Duration.ofMillis(properties.getRequestTimeoutMs()))
+                .connectionString(properties.getConnectionString())
+                .eventHubName(properties.getEventHubName())
+                .namespaceFullyQualifiedDomainName(properties.getNamespaceFullyQualifiedDomainName())
                 .build();
     }
 

@@ -1,7 +1,5 @@
 package gov.fdic.tip.commons.notification;
 
-import java.time.Duration;
-
 /**
  * Static entry point for code that isn't Spring-managed (matches
  * RetentionUtil's pattern in tip-commons). Must be initialized once at
@@ -17,29 +15,46 @@ public final class NotificationPublishUtil {
     private static volatile NotificationPublishEngine engine;
 
     private NotificationPublishUtil() {
+        // Prevent instantiation of utility class
     }
 
-    public static void configure(String baseUrl, String tenantId, String clientId, String clientSecret, String tokenScope) {
+    /**
+     * Configure the engine using an explicit Azure Event Hub Connection String.
+     * Maps to the 'connection-string' authentication strategy.
+     *
+     * @param connectionString The full connection string pointing to the Azure Event Hubs namespace.
+     * @param eventHubName     The target name of the specific Event Hub entity instance.
+     */
+    public static void configure(String connectionString, String eventHubName) {
         engine = NotificationPublishEngine.builder()
-                .baseUrl(baseUrl)
-                .authMode("client-secret")
-                .tenantId(tenantId)
-                .clientId(clientId)
-                .clientSecret(clientSecret)
-                .tokenScope(tokenScope)
-                .requestTimeout(Duration.ofSeconds(5))
+                .authMode("connection-string")
+                .connectionString(connectionString)
+                .eventHubName(eventHubName)
                 .build();
     }
 
-    public static void configureWithManagedIdentity(String baseUrl, String tokenScope) {
+    /**
+     * Configure the engine using Azure Active Directory / Entra ID Managed Identity.
+     * Maps to the 'managed-identity' authentication strategy.
+     *
+     * @param namespaceFullyQualifiedDomainName The fully qualified domain name (e.g., "yournamespace.servicebus.windows.net").
+     * @param eventHubName                      The target name of the specific Event Hub entity instance.
+     */
+    public static void configureWithManagedIdentity(String namespaceFullyQualifiedDomainName, String eventHubName) {
         engine = NotificationPublishEngine.builder()
-                .baseUrl(baseUrl)
                 .authMode("managed-identity")
-                .tokenScope(tokenScope)
-                .requestTimeout(Duration.ofSeconds(5))
+                .namespaceFullyQualifiedDomainName(namespaceFullyQualifiedDomainName)
+                .eventHubName(eventHubName)
                 .build();
     }
 
+    /**
+     * Proxies the request down to the initialized, underlying Event Hub producer.
+     *
+     * @param request The data payload containing message body, context, and routing rules.
+     * @return A confirmation response with unique transmission metadata.
+     * @throws NotificationPublishException If called before configuration or if the Event Hub client delivery fails.
+     */
     public static NotificationPublishResponse publish(NotificationPublishRequest request) throws NotificationPublishException {
         if (engine == null) {
             throw new IllegalStateException(
