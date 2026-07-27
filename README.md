@@ -1,113 +1,242 @@
 # tip-commons-notification
 
-Shared library so any TIP service can publish a notification event with one
-call, without knowing the notification service's REST contract, Entra auth
-mechanics, or idempotency key rules.
+A shared, high-performance Java core library designed to allow any TIP service (Spring Boot Microservices or Standalone Batch Utilities) to stream notification events directly into **Azure Event Hubs**. 
 
-## Important: this calls REST, not Azure Event Hub
+This library completely bypasses the need for an external, synchronous notification microservice HTTP endpoint, eliminating the risk of missing critical notification events during transient network blips or microservice outages. It features built-in automatic retry logic managed natively by the Azure SDK and leverages an **Idempotency Key as an Event Hub Partition Key** to enforce ordered message processing downstream.
 
-`NotificationPublishEngine` calls `POST {baseUrl}/api/v1/notification-events`
-on the notification service - it does **not** publish to Event Hub directly.
+---
 
-This is intentional: `NotificationPublishService` (server-side) does
-recipient resolution, severity/publisher validation, idempotency-key
-deduplication, and template rendering - all of which must happen *before*
-`NotificationDelivery` rows exist for the Event Hub consumer to act on.
-Publishing straight to Event Hub from this jar would skip all of that and
-produce messages with nothing in the database to dispatch.
+## Table of Contents
+1. [Prerequisites & Dependencies](#1-prerequisites--dependencies)
+2. [Configuration Properties](#2-configuration-properties)
+3. [Spring Boot Service Implementation Guide](#3-spring-boot-service-implementation-guide)
+4. [Standalone Batch Job Implementation Guide](#4-standalone-batch-job-implementation-guide)
+5. [Architecture & Best Practices](#5-architecture--best-practices)
 
-## Add the dependency
+---
+
+## 1. Prerequisites & Dependencies
+
+To use this library across your services, add the `tip-commons-notification` JAR dependency alongside the official Azure Event Hubs SDK in your project's `pom.xml`:
 
 ```xml
-<dependency>
-    <groupId>gov.fdic.tip</groupId>
-    <artifactId>tip-commons-notification</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
-</dependency>
-```
+<dependencies>
+    <dependency>
+        <groupId>gov.fdic.tip</groupId>
+        <artifactId>tip-commons-notification</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </dependency>
 
-## Configure (application.yml)
+    <dependency>
+        <groupId>com.azure</groupId>
+        <artifactId>azure-messaging-eventhubs</artifactId>
+        <version>5.15.0</version>
+    </dependency>
+</dependencies>
 
-```yaml
+Configure the library inside your application's application.yml or application.properties. The library automatically binds configuration keys matching the prefix tip.notification-publish.*.
+
+Option A: Connection String Authentication (SAS Token)
+
 tip:
   notification-publish:
-    base-url: https://tip-notification.internal.fdic.gov
-    auth-mode: managed-identity          # or client-secret for local/dev
-    token-scope: api://tip-notification-service/.default
-    # tenant-id / client-id / client-secret: only needed if auth-mode=client-secret
-```
+    enabled: true
+    auth-mode: connection-string
+    connection-string: "Endpoint=sb://your-namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=your-primary-key-goes-here"
+    event-hub-name: "notification-events"
+    
 
-`NotificationPublishClient` is now available to `@Autowire` anywhere.
+Option B: Azure Entra ID Managed Identity
 
-## Usage (Spring Boot)
+tip:
+  notification-publish:
+    enabled: true
+    auth-mode: managed-identity
+    namespace-fully-qualified-domain-name: "your-namespace.servicebus.windows.net"
+    event-hub-name: "notification-events"
+    
+3. Spring Boot Service Implementation Guide    
 
-```java
+Step 1: Define Your Inbound Request DTO
+Create a custom object mapping incoming testing request payloads.
+
+package com.example.myservice.dto;
+
+import lombok.Data;
+import java.util.Map;
+
+@Data
+public class TestNotificationRequest {
+    private String eventType;        // e.g., "LOAN_APPLICATION_SUBMITTED"
+    private String recipientEmail;   // e.g., "dev-team@fdic.gov"
+    private String orderId;          // Core entity ID utilized for partition keys
+    private Map<String, Object> details; // Metadata context dictionary
+}
+
+Step 2: Inject Client into the Business Service Layer
+Inject the library-provided NotificationPublishClient interface to assemble and dispatch requests.
+
+package com.example.myservice.service;
+
+import com.example.myservice.dto.TestNotificationRequest;
+import gov.fdic.tip.commons.notification.NotificationPublishClient;
+import gov.fdic.tip.commons.notification.NotificationPublishException;
+import gov.fdic.tip.commons.notification.NotificationPublishRequest;
+import gov.fdic.tip.commons.notification.NotificationPublishResponse;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import java.util.UUID;
+
+@Slf4j
 @Service
-public class RetentionStampingService {
+@RequiredArgsConstructor
+public class NotificationTestService {
 
+    // Automatically autowired by TipCommonsNotificationAutoConfiguration
     private final NotificationPublishClient notificationPublishClient;
 
-    public RetentionStampingService(NotificationPublishClient notificationPublishClient) {
-        this.notificationPublishClient = notificationPublishClient;
-    }
+    public String sendTestNotification(TestNotificationRequest testRequest) {
+        log.info("Processing test notification dispatch for event: {}", testRequest.getEventType());
 
-    public void onRecordStamped(RetentionRecord record) {
+        // Establish a stable Idempotency Key based on your database entity
+        String idempotencyKey = "txn-" + testRequest.getOrderId() + "-" + testRequest.getEventType();
+
+        // Build the immutable request structure
+        NotificationPublishRequest publishRequest = NotificationPublishRequest.builder()
+                .eventId(UUID.randomUUID().toString())
+                .source("MY_SPRING_MICROSERVICE") 
+                .eventType(testRequest.getEventType())
+                .severity("INFO")
+                .idempotencyKey(idempotencyKey)
+                .recipientEmail(testRequest.getRecipientEmail())
+                .context(testRequest.getDetails())
+                .build();
+
         try {
-            notificationPublishClient.publish(NotificationPublishRequest.builder()
-                    .source("RETENTION_ETL")
-                    .eventType("RETENTION_STAMPED")
-                    // STABLE key - if this batch step reruns for the same record,
-                    // the server recognizes it as the same event via
-                    // findBySourceAndIdempotencyKey(...) instead of creating a duplicate.
-                    .idempotencyKey("retention-stamp-" + record.getRecordId())
-                    .recipientEmail(record.getOwnerEmail())
-                    .context(Map.of("recordId", record.getRecordId(), "purgeDate", record.getPurgeDate()))
-                    .build());
+            // Transmit directly into Azure Event Hubs synchronously
+            NotificationPublishResponse response = notificationPublishClient.publish(publishRequest);
+            
+            log.info("Successfully streamed to Event Hub! Event Tracking ID: {}", response.notificationEventId());
+            return "Success! Event Hub tracking ID: " + response.notificationEventId();
+
         } catch (NotificationPublishException e) {
-            // Decide deliberately: usually log and continue rather than fail the
-            // underlying business operation over a notification issue.
-            log.warn("Failed to publish notification for recordId={}", record.getRecordId(), e);
+            log.error("Failed to commit event payload into Azure Event Hub log stream", e);
+            return "Failed to send event: " + e.getMessage();
         }
     }
 }
-```
 
-## Usage (non-Spring / plain batch tooling)
+Step 3: Expose via Rest Controller
+Expose a simple POST REST interface for operational testing or tracking.
 
-```java
-// Once at startup:
-NotificationPublishUtil.configureWithManagedIdentity(
-        "https://tip-notification.internal.fdic.gov",
-        "api://tip-notification-service/.default");
+package com.example.myservice.controller;
 
-// Anywhere after:
-NotificationPublishUtil.publish(NotificationPublishRequest.builder()
-        .source("QUARTZ_SCHEDULER")
-        .eventType("JOB_FAILED")
-        .idempotencyKey("job-failure-" + jobRunId)
-        .recipientRole("SCHEDULER_ADMIN")
-        .build());
-```
+import com.example.myservice.dto.TestNotificationRequest;
+import com.example.myservice.service.NotificationTestService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
-## idempotencyKey - the one field to get right
+@RestController
+@RequestMapping("/api")
+@RequiredArgsConstructor
+public class NotificationTestController {
 
-- **One-shot operations** (a user action, a single API call): fine to derive
-  from something unique to that call, or even random - it won't retry with
-  the same identity.
-- **Retryable operations** (a batch step that might rerun, a call your own
-  code retries on timeout): MUST be a stable value derived from the source
-  record/operation, or a retry becomes a second `NotificationEvent` server-side.
+    private final NotificationTestService notificationTestService;
 
-## severity / recipientEmail - both optional
+    @PostMapping("/test-notification")
+    public ResponseEntity<String> triggerNotification(@RequestBody TestNotificationRequest request) {
+        String result = notificationTestService.sendTestNotification(request);
+        
+        if (result.startsWith("Success")) {
+            return ResponseEntity.ok(result);
+        } else {
+            return ResponseEntity.internalServerError().body(result);
+        }
+    }
+}
 
-- Omit `severity` to let the server use the event type's configured default.
-- Omit `recipientEmail` for a broadcast to the event's configured audience
-  (subject to the server's broadcast cap - see
-  `resolveRecipients`/`getBroadcastCap()` in `NotificationPublishService`).
+Step 4: Run a Test Request
+Execute a cURL execution block directly against your running instance:
 
-## Error handling
+curl -X POST http://localhost:8080/api/test-notification \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventType": "LOAN_APPLICATION_SUBMITTED",
+    "recipientEmail": "dev-team@fdic.gov",
+    "orderId": "987654",
+    "details": {
+      "applicantName": "John Doe",
+      "amountRequested": 250000,
+      "riskScore": "LOW"
+    }
+  }'
+  
+  
+4. Standalone Batch Job Implementation Guide
+For utility scripts, legacy batch routines, or environments where a full Spring Dependency Injection context is absent, developers must utilize the thread-safe static interface wrapper: NotificationPublishUtil.
 
-`publish()` throws a checked `NotificationPublishException` - this library
-does not decide for you whether a failed publish should fail your operation.
-A `409` response (idempotency key reused with a different payload) is a
-caller bug, not a transient failure - don't blindly retry on that one.
+
+Step 1: Initialize at Application Bootstrap
+Call .configure() exactly once at the entry point of your batch run lifecycle (e.g., inside the public static void main method).
+package com.example.batch;
+
+import gov.fdic.tip.commons.notification.NotificationPublishUtil;
+
+public class StandaloneBatchApplication {
+
+    public static void main(String[] args) {
+        System.out.println("Initializing Batch Routine Framework Context...");
+
+        // Pull these environments parameters out of your system variables or property loader
+        String connectionString = System.getenv("EVENT_HUB_CONNECTION_STRING");
+        String eventHubName = "notification-events";
+
+        // Initialize the internal static publishing engine engine once
+        NotificationPublishUtil.configure(connectionString, eventHubName);
+
+        // Alternatively, if deploying batches to Azure utilizing Managed Identity:
+        // NotificationPublishUtil.configureWithManagedIdentity("yournamespace.servicebus.windows.net", eventHubName);
+
+        // Kickoff application batch workflow logic
+        executeBatchProcess();
+    }
+}
+
+Step 2: Publish Events from Anywhere Inside Your Processing Logic
+Once initialized, developers can safely issue fire-and-forget or audited publication streams from anywhere in the multi-threaded batch executor.
+
+package com.example.batch.task;
+
+import gov.fdic.tip.commons.notification.*;
+import java.util.Map;
+
+public class FileProcessingTask {
+
+    public void processRecord(String recordId, String userEmail) {
+        // ... Business Processing Steps ...
+
+        try {
+            // Assembling Notification Payload
+            NotificationPublishRequest batchEventRequest = NotificationPublishRequest.builder()
+                    .source("COMPLIANCE_BATCH_JOB")
+                    .eventType("RECORD_PROCESSED")
+                    .idempotencyKey("batch-rec-" + recordId) // Ensures strict log partitioning
+                    .recipientEmail(userEmail)
+                    .context(Map.of("recordId", recordId, "status", "PROCESSED_SUCCESSFULLY"))
+                    .build();
+
+            // Execute via static Proxy Util wrapper 
+            NotificationPublishResponse result = NotificationPublishUtil.publish(batchEventRequest);
+            System.out.println("Successfully committed record notification event. Tracking ID: " + result.notificationEventId());
+
+        } catch (NotificationPublishException e) {
+            System.err.println("Critical Failure: Unable to publish notification to Event Hub namespace: " + e.getMessage());
+            // Take appropriate local fallback steps (e.g., logging to local outbox table)
+        }
+    }
+}
+
+
+
