@@ -1,0 +1,35 @@
+# ADD to application.yml - two things needed for this fix:
+
+tip:
+  event-hub:
+    startup-retry:
+      connect-timeout-ms: 15000
+      initial-backoff-ms: 5000
+      backoff-multiplier: 2.0
+      max-backoff-ms: 120000
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true            # enables /actuator/health/liveness and /actuator/health/readiness
+      group:
+        readiness:
+          include: eventHubConsumer, db, readinessState
+        liveness:
+          include: livenessState   # deliberately does NOT include eventHubConsumer or db
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+
+# If deployed on Kubernetes, point the probes at these paths so a flaky Event
+# Hub connection affects READINESS (traffic/alerting) but never triggers a
+# pod restart via LIVENESS:
+#
+#   livenessProbe:
+#     httpGet:
+#       path: /actuator/health/liveness
+#   readinessProbe:
+#     httpGet:
+#       path: /actuator/health/readiness
